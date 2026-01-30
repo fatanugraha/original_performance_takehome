@@ -93,8 +93,7 @@ class KernelBuilder:
         tmp1 = self.alloc_scratch("tmp1")
         tmp2 = self.alloc_scratch("tmp2")
         tmp3 = self.alloc_scratch("tmp3")
-        left = self.alloc_scratch("left")
-        right = self.alloc_scratch("right")
+
         # Scratch space addresses
         init_vars = [
             "rounds",
@@ -123,20 +122,29 @@ class KernelBuilder:
         # Any debug engine instruction is ignored by the submission simulator
         self.add("debug", ("comment", "Starting loop"))
 
-        body = []  # array of slots
-
-        # Scalar scratch registers
-        tmp_node_val = self.alloc_scratch("tmp_node_val")
-        tmp_addr = self.alloc_scratch("tmp_addr")
-
         val_base_addr = SCRATCH_SIZE-batch_size
         idx_base_addr = val_base_addr-batch_size
-        branch_addr = idx_base_addr-VLEN # to precompute branch target
+        t_node_val_p = idx_base_addr - VLEN
+        t_branch_2x = t_node_val_p - VLEN
+        t_node_val = t_branch_2x - VLEN
+        t_hash_val = t_node_val - VLEN
+        t_left = t_hash_val - VLEN
+        t_right = t_left - VLEN
+        t_twos = t_right - VLEN
+        t_ones = t_twos - VLEN
+        t_n_nodes = t_ones - VLEN
+        t_zeros = t_n_nodes - VLEN
 
         # load idx and vals to scratch
         self.instrs.append({
             "alu": [("+", tmp3, zero_const, self.scratch['inp_values_p'])],
-            "load": [("const", tmp1, VLEN)]
+            "load": [("const", tmp1, VLEN)],
+            "valu": [
+                ("vbroadcast", t_zeros, zero_const), # gp1 = 2*idx [t]
+                ("vbroadcast", t_twos, two_const), # gp1 = 2*idx [t]
+                ("vbroadcast", t_ones, one_const), # gp1 = 2*idx [t]
+                ("vbroadcast", t_n_nodes, self.scratch["n_nodes"]) # gp1 = 2*idx [t]
+            ],
         })
         for i in range(0, 256, 8):
             self.instrs.append({
@@ -145,41 +153,55 @@ class KernelBuilder:
             })
 
         for round in range(rounds):
-            for i in range(batch_size):
-                # idx = mem[inp_indices_p + i]
-                idx_addr = idx_base_addr + i
-                self.instrs.append({"debug": [("compare", idx_addr, (round, i, "idx"))]})
+            for gid in range(0, batch_size, 8):
+                gidx_addr = idx_base_addr + gid
+                gval_addr = val_base_addr + gid
 
-                # val = mem[inp_values_p + i]
-                val_addr = val_base_addr + i
-                self.instrs.append({"debug": [("compare", val_addr, (round, i, "val"))]})
-
-                # node_val = mem[forest_values_p + idx]
-                self.instrs.append({"alu": [
-                    ("+", tmp_addr, self.scratch["forest_values_p"], idx_addr),
-                    ("*", tmp3, idx_addr, two_const), # speculate next branch.
+                self.instrs.append({"valu": [
+                    ("vbroadcast", t_node_val_p, self.scratch["forest_values_p"]), # gp0 = node_val_p [t]
                 ]})
-                self.instrs.append({"load": [("load", tmp_node_val, tmp_addr)]})
-                self.instrs.append({"debug": [("compare", tmp_node_val, (round, i, "node_val"))]})
 
-                # val = myhash(val ^ node_val)
-                self.instrs.append({"alu": [
-                    ("^", val_addr, val_addr, tmp_node_val),
-                    ("+", left, tmp3, one_const), # speculate next branch.
-                    ("+", right, tmp3, two_const), # speculate next branch.
+                self.instrs.append({"valu": [
+                    ("+", t_node_val_p, t_node_val_p, gidx_addr),
+                    ("*", t_branch_2x, t_twos, gidx_addr)
                 ]})
-                self.build_hash(val_addr, tmp1, tmp2, round, i)
-                self.instrs.append({"debug": [("compare", val_addr, (round, i, "hashed_val"))]})
+
+                for tid in range(8):
+                    self.instrs.append({"load": [
+                        ("load", t_node_val+tid, t_node_val_p+tid) # gp2 = node_val [t], gp0 is free to use now
+                    ]})
+
+                for tid in range(0, VLEN):
+                    i = gid+tid
+                    self.instrs.append({"debug": [("compare", gidx_addr+tid, (round, i, "idx"))]})
+                    self.instrs.append({"debug": [("compare", gval_addr+tid, (round, i, "val"))]})
+                    self.instrs.append({"debug": [("compare", t_node_val+tid, (round, i, "node_val"))]})
+
+                self.instrs.append({"valu": [
+                    ("^", gval_addr, gval_addr, t_node_val),
+                    ("+", t_left, t_branch_2x, t_ones), # speculate next branch.
+                    ("+", t_right, t_branch_2x, t_twos), # speculate next branch.
+                ]})
+
+                for tid in range(0, VLEN):
+                    i = gid+tid
+                    self.build_hash(gval_addr+tid, tmp1, tmp2, round, i)
+                    self.instrs.append({"debug": [("compare", gval_addr+tid, (round, i, "hashed_val"))]})
 
                 # idx = 2*idx + (1 if val % 2 == 0 else 2)
-                self.instrs.append({"alu": [("%", tmp1, val_addr, two_const)]})
-                self.instrs.append({"flow": [("select", idx_addr, tmp1, right, left)]})
-                self.instrs.append({"debug": [("compare", idx_addr, (round, i, "next_idx"))]})
+                self.instrs.append({"valu": [("%", t_hash_val, gval_addr, t_twos)]})
+                self.instrs.append({"flow": [("vselect", gidx_addr, t_hash_val, t_right, t_left)]})
 
-                # idx = 0 if idx >= n_nodes else idx
-                self.instrs.append({"alu": [("<", tmp1, idx_addr, self.scratch["n_nodes"])]})
-                self.instrs.append({"flow": [("select", idx_addr, tmp1, idx_addr, zero_const)]})
-                self.instrs.append({"debug": [("compare", idx_addr, (round, i, "wrapped_idx"))]})
+                for tid in range(0, VLEN):
+                    i = gid+tid
+                    self.instrs.append({"debug": [("compare", gidx_addr+tid, (round, i, "next_idx"))]})
+
+                # # # idx = 0 if idx >= n_nodes else idx
+                self.instrs.append({"valu": [("<", t_hash_val, gidx_addr, t_n_nodes)]})
+                self.instrs.append({"flow": [("vselect", gidx_addr, t_hash_val, gidx_addr, t_zeros)]})
+                for tid in range(0, VLEN):
+                    i = gid+tid
+                    self.instrs.append({"debug": [("compare", gidx_addr+tid, (round, i, "wrapped_idx"))]})
 
         # write back the idx and vals from scratch to mem
         self.instrs.append({
@@ -235,7 +257,6 @@ def do_kernel_test(
     for i, ref_mem in enumerate(reference_kernel2(mem, value_trace)):
         machine.run()
 
-        # print(machine.cores[0].scratch)
         # print(machine.mem)
         inp_values_p = ref_mem[6]
         if prints:
