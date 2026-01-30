@@ -76,8 +76,10 @@ class KernelBuilder:
 
     def build_hash(self, val_hash_addr, tmp1, tmp2, round, i):
         for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
-            self.instrs.append({"alu": [(op1, tmp1, val_hash_addr, self.scratch_const(val1))]})
-            self.instrs.append({"alu": [(op3, tmp2, val_hash_addr, self.scratch_const(val3))]})
+            self.instrs.append({"alu": [
+                (op1, tmp1, val_hash_addr, self.scratch_const(val1)),
+                (op3, tmp2, val_hash_addr, self.scratch_const(val3)),
+            ]})
             self.instrs.append({"alu": [(op2, val_hash_addr, tmp1, tmp2)]})
             self.instrs.append({"debug": [("compare", val_hash_addr, (round, i, "hash_stage", hi))]})
 
@@ -127,7 +129,7 @@ class KernelBuilder:
 
         val_base_addr = SCRATCH_SIZE-batch_size
         idx_base_addr = val_base_addr-batch_size
-        branch_addr = idx_base_addr-VLEN
+        branch_addr = idx_base_addr-VLEN # to precompute branch target
 
         # load idx and vals to scratch
         self.instrs.append({
