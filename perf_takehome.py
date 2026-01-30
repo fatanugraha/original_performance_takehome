@@ -93,6 +93,8 @@ class KernelBuilder:
         tmp1 = self.alloc_scratch("tmp1")
         tmp2 = self.alloc_scratch("tmp2")
         tmp3 = self.alloc_scratch("tmp3")
+        left = self.alloc_scratch("left")
+        right = self.alloc_scratch("right")
         # Scratch space addresses
         init_vars = [
             "rounds",
@@ -153,20 +155,25 @@ class KernelBuilder:
                 self.instrs.append({"debug": [("compare", val_addr, (round, i, "val"))]})
 
                 # node_val = mem[forest_values_p + idx]
-                self.instrs.append({"alu": [("+", tmp_addr, self.scratch["forest_values_p"], idx_addr)]})
+                self.instrs.append({"alu": [
+                    ("+", tmp_addr, self.scratch["forest_values_p"], idx_addr),
+                    ("*", tmp3, idx_addr, two_const), # speculate next branch.
+                ]})
                 self.instrs.append({"load": [("load", tmp_node_val, tmp_addr)]})
                 self.instrs.append({"debug": [("compare", tmp_node_val, (round, i, "node_val"))]})
 
                 # val = myhash(val ^ node_val)
-                self.instrs.append({"alu": [("^", val_addr, val_addr, tmp_node_val)]})
+                self.instrs.append({"alu": [
+                    ("^", val_addr, val_addr, tmp_node_val),
+                    ("+", left, tmp3, one_const), # speculate next branch.
+                    ("+", right, tmp3, two_const), # speculate next branch.
+                ]})
                 self.build_hash(val_addr, tmp1, tmp2, round, i)
                 self.instrs.append({"debug": [("compare", val_addr, (round, i, "hashed_val"))]})
 
                 # idx = 2*idx + (1 if val % 2 == 0 else 2)
                 self.instrs.append({"alu": [("%", tmp1, val_addr, two_const)]})
-                self.instrs.append({"alu": [("+", tmp1, tmp1, one_const)]})
-                self.instrs.append({"alu": [("*", tmp2, idx_addr, two_const)]})
-                self.instrs.append({"alu": [("+", idx_addr, tmp1, tmp2)]})
+                self.instrs.append({"flow": [("select", idx_addr, tmp1, right, left)]})
                 self.instrs.append({"debug": [("compare", idx_addr, (round, i, "next_idx"))]})
 
                 # idx = 0 if idx >= n_nodes else idx
