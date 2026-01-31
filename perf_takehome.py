@@ -74,14 +74,42 @@ class KernelBuilder:
             self.const_map[val] = addr
         return self.const_map[val]
 
-    def build_hash(self, val_hash_addr, tmp1, tmp2, round, i):
-        for hi, (op1, val1, op2, op3, val3) in enumerate(HASH_STAGES):
-            self.instrs.append({"alu": [
-                (op1, tmp1, val_hash_addr, self.scratch_const(val1)),
-                (op3, tmp2, val_hash_addr, self.scratch_const(val3)),
-            ]})
-            self.instrs.append({"alu": [(op2, val_hash_addr, tmp1, tmp2)]})
-            self.instrs.append({"debug": [("compare", val_hash_addr, (round, i, "hash_stage", hi))]})
+    def build_hash(self, val_hash_addr, tmp1, tmp2, t_hash_magic, t_hash_magic_2, round, i):
+        self.instrs.append({"valu": [
+            ("+", tmp1, val_hash_addr, t_hash_magic+0*VLEN),
+            ("<<", tmp2, val_hash_addr, t_hash_magic_2+0*VLEN),
+        ]})
+        self.instrs.append({"valu": [("+", val_hash_addr, tmp1, tmp2)]})
+
+        self.instrs.append({"valu": [
+            ("^", tmp1, val_hash_addr, t_hash_magic+1*VLEN),
+            (">>", tmp2, val_hash_addr, t_hash_magic_2+1*VLEN),
+        ]})
+        self.instrs.append({"valu": [("^", val_hash_addr, tmp1, tmp2)]})
+
+        self.instrs.append({"valu": [
+            ("+", tmp1, val_hash_addr, t_hash_magic+2*VLEN),
+            ("<<", tmp2, val_hash_addr, t_hash_magic_2+2*VLEN),
+        ]})
+        self.instrs.append({"valu": [("+", val_hash_addr, tmp1, tmp2)]})
+
+        self.instrs.append({"valu": [
+            ("+", tmp1, val_hash_addr, t_hash_magic+3*VLEN),
+            ("<<", tmp2, val_hash_addr, t_hash_magic_2+3*VLEN),
+        ]})
+        self.instrs.append({"valu": [("^", val_hash_addr, tmp1, tmp2)]})
+
+        self.instrs.append({"valu": [
+            ("+", tmp1, val_hash_addr, t_hash_magic+4*VLEN),
+            ("<<", tmp2, val_hash_addr, t_hash_magic_2+4*VLEN),
+        ]})
+        self.instrs.append({"valu": [("+", val_hash_addr, tmp1, tmp2)]})
+
+        self.instrs.append({"valu": [
+            ("^", tmp1, val_hash_addr, t_hash_magic+5*VLEN),
+            (">>", tmp2, val_hash_addr, t_hash_magic_2+5*VLEN),
+        ]})
+        self.instrs.append({"valu": [("^", val_hash_addr, tmp1, tmp2)]})
 
     def build_kernel(
         self, forest_height: int, n_nodes: int, batch_size: int, rounds: int
@@ -134,6 +162,10 @@ class KernelBuilder:
         t_ones = t_twos - VLEN
         t_n_nodes = t_ones - VLEN
         t_zeros = t_n_nodes - VLEN
+        t_tmp1 = t_zeros - VLEN
+        t_tmp2 = t_tmp1 - VLEN
+        t_hash_magic = t_tmp2 - (6 * VLEN)
+        t_hash_magic_2 = t_hash_magic - (6 * VLEN)
 
         # load idx and vals to scratch
         self.instrs.append({
@@ -143,8 +175,28 @@ class KernelBuilder:
                 ("vbroadcast", t_zeros, zero_const), # gp1 = 2*idx [t]
                 ("vbroadcast", t_twos, two_const), # gp1 = 2*idx [t]
                 ("vbroadcast", t_ones, one_const), # gp1 = 2*idx [t]
-                ("vbroadcast", t_n_nodes, self.scratch["n_nodes"]) # gp1 = 2*idx [t]
+                ("vbroadcast", t_n_nodes, self.scratch["n_nodes"]), # gp1 = 2*idx [t]
             ],
+        })
+        self.instrs.append({
+            "valu": [
+                ("vbroadcast", t_hash_magic+0*VLEN, self.scratch_const(0x7ED55D16)),
+                ("vbroadcast", t_hash_magic+1*VLEN, self.scratch_const(0xC761C23C)),
+                ("vbroadcast", t_hash_magic+2*VLEN, self.scratch_const(0x165667B1)),
+                ("vbroadcast", t_hash_magic+3*VLEN, self.scratch_const(0xD3A2646C)),
+                ("vbroadcast", t_hash_magic+4*VLEN, self.scratch_const(0xFD7046C5)),
+                ("vbroadcast", t_hash_magic+5*VLEN, self.scratch_const(0xB55A4F09)),
+            ]
+        })
+        self.instrs.append({
+            "valu": [
+                ("vbroadcast", t_hash_magic_2+0*VLEN, self.scratch_const(12)),
+                ("vbroadcast", t_hash_magic_2+1*VLEN, self.scratch_const(19)),
+                ("vbroadcast", t_hash_magic_2+2*VLEN, self.scratch_const(5)),
+                ("vbroadcast", t_hash_magic_2+3*VLEN, self.scratch_const(9)),
+                ("vbroadcast", t_hash_magic_2+4*VLEN, self.scratch_const(3)),
+                ("vbroadcast", t_hash_magic_2+5*VLEN, self.scratch_const(16)),
+            ]
         })
         for i in range(0, 256, 8):
             self.instrs.append({
@@ -183,9 +235,10 @@ class KernelBuilder:
                     ("+", t_right, t_branch_2x, t_twos), # speculate next branch.
                 ]})
 
+                self.build_hash(gval_addr, t_tmp1, t_tmp2, t_hash_magic, t_hash_magic_2, round, i)
+
                 for tid in range(0, VLEN):
                     i = gid+tid
-                    self.build_hash(gval_addr+tid, tmp1, tmp2, round, i)
                     self.instrs.append({"debug": [("compare", gval_addr+tid, (round, i, "hashed_val"))]})
 
                 # idx = 2*idx + (1 if val % 2 == 0 else 2)
