@@ -134,6 +134,7 @@ class KernelBuilder:
         ]
         for v in init_vars:
             self.alloc_scratch(v, 1)
+
         for i, v in enumerate(init_vars):
             self.add("load", ("const", tmp1, i))
             self.add("load", ("load", self.scratch[v], tmp1))
@@ -141,6 +142,7 @@ class KernelBuilder:
         zero_const = self.scratch_const(0)
         one_const = self.scratch_const(1)
         two_const = self.scratch_const(2)
+        vlen_const = self.scratch_const(VLEN)
 
         # Pause instructions are matched up with yield statements in the reference
         # kernel to let you debug at intermediate steps. The testing harness in this
@@ -170,7 +172,6 @@ class KernelBuilder:
         # load idx and vals to scratch
         self.instrs.append({
             "alu": [("+", tmp3, zero_const, self.scratch['inp_values_p'])],
-            "load": [("const", tmp1, VLEN)],
             "valu": [
                 ("vbroadcast", t_zeros, zero_const), # gp1 = 2*idx [t]
                 ("vbroadcast", t_twos, two_const), # gp1 = 2*idx [t]
@@ -178,6 +179,7 @@ class KernelBuilder:
                 ("vbroadcast", t_n_nodes, self.scratch["n_nodes"]), # gp1 = 2*idx [t]
             ],
         })
+
         self.instrs.append({
             "valu": [
                 ("vbroadcast", t_hash_magic+0*VLEN, self.scratch_const(0x7ED55D16)),
@@ -201,7 +203,7 @@ class KernelBuilder:
         for i in range(0, 256, 8):
             self.instrs.append({
                 "load": [("vload", val_base_addr+i, tmp3)],
-                "alu": [("+", tmp3, tmp3, tmp1)],
+                "alu": [("+", tmp3, tmp3, vlen_const)],
             })
 
         for round in range(rounds):
@@ -218,9 +220,10 @@ class KernelBuilder:
                     ("*", t_branch_2x, t_twos, gidx_addr)
                 ]})
 
-                for tid in range(8):
+                for tid in range(0, 8, 2):
                     self.instrs.append({"load": [
-                        ("load", t_node_val+tid, t_node_val_p+tid) # gp2 = node_val [t], gp0 is free to use now
+                        ("load", t_node_val+tid, t_node_val_p+tid), # gp2 = node_val [t], gp0 is free to use now
+                        ("load", t_node_val+tid+1, t_node_val_p+tid+1) # gp2 = node_val [t], gp0 is free to use now
                     ]})
 
                 for tid in range(0, VLEN):
@@ -258,7 +261,6 @@ class KernelBuilder:
 
         # write back the idx and vals from scratch to mem
         self.instrs.append({
-            "load": [("const", tmp1, VLEN)],
             "alu": [
                 ("+", tmp2, zero_const, self.scratch['inp_indices_p']),
                 ("+", tmp3, zero_const, self.scratch['inp_values_p'])
@@ -270,7 +272,7 @@ class KernelBuilder:
                     ("vstore", tmp2, idx_base_addr+i),
                     ("vstore", tmp3, val_base_addr+i),
                 ],
-                "alu": [("+", tmp3, tmp3, tmp1), ("+", tmp2, tmp2, tmp1)],
+                "alu": [("+", tmp3, tmp3, vlen_const), ("+", tmp2, tmp2, vlen_const)],
             })
 
         # Required to match with the yield in reference_kernel2
